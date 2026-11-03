@@ -41,6 +41,18 @@ public class SchemaCompatibilityService {
     private final DefaultFunctionResolver functionResolver;
 
     /**
+     * Читает текущую схему целевой БД для указанных таблиц.
+     * Публичный метод для использования из других сервисов.
+     */
+    public SchemaMeta getCurrentSchema(
+            DbCredentials dbCredentials,
+            String targetDatabase,
+            List<String> tableNames
+    ) {
+        return metadataService.readSchema(dbCredentials, targetDatabase, tableNames);
+    }
+
+    /**
      * Анализирует совместимость схемы резервной копии с целевой базой данных.
      * <p>
      * Выполняет сравнение таблиц и колонок между резервной копией и целевой базой данных,
@@ -327,6 +339,23 @@ public class SchemaCompatibilityService {
             }
         }
 
+        // === Post-processing: гарантируем, что все колонки из missingColumns есть в readyToUseMissingFields ===
+        int missingFromDefaults = 0;
+        for (MissingColumnWithDefault mc : missingColumns) {
+            Map<String, Object> tableDefaults = readyToUseMissingFields.get(mc.tableName());
+            if (tableDefaults == null || !tableDefaults.containsKey(mc.columnName())) {
+                log.warn("[MISSING_COLUMNS] Column '{}' in table '{}' is in missingColumns but not in readyToUseMissingFields — auto-fixing",
+                        mc.columnName(), mc.tableName());
+                readyToUseMissingFields
+                        .computeIfAbsent(mc.tableName(), k -> new HashMap<>())
+                        .put(mc.columnName(), getDefaultValueForType(mc.columnType(), mc.nullable()));
+                missingFromDefaults++;
+            }
+        }
+        if (missingFromDefaults > 0) {
+            log.warn("[MISSING_COLUMNS] Fixed {} columns missing from readyToUseMissingFields", missingFromDefaults);
+        }
+
         int tableCount = (int) missingColumns.stream()
                 .map(MissingColumnWithDefault::tableName)
                 .distinct()
@@ -446,10 +475,10 @@ public class SchemaCompatibilityService {
             return false;
         }
 
-        // Date/time типы
-        if (lowerType.startsWith("date") || lowerType.startsWith("time") || 
+        // Date/time типы — возвращаем плейсхолдер #now, который DefaultFunctionResolver разрешит в CURRENT_TIMESTAMP
+        if (lowerType.startsWith("date") || lowerType.startsWith("time") ||
             lowerType.startsWith("datetime") || lowerType.startsWith("timestamp")) {
-            return "";
+            return "#now";
         }
 
         // Enum типы - берём первый элемент
